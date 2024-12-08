@@ -36,6 +36,7 @@ io.on("connection", (socket) => {
       if (rooms[roomId]) throw new Error("Room already exists");
 
       rooms = createRoom(rooms, roomId, player);
+      rooms[roomId].spectators = []; // Initialize spectators array
       socket.join(roomId);
 
       io.to(roomId).emit("room-update", rooms[roomId]);
@@ -53,7 +54,6 @@ io.on("connection", (socket) => {
     socket.emit("room-exists", roomExists);
   });
 
-  // Join room
   socket.on("join-room", ({ roomId, player }) => {
     console.log(
       `Join room request: roomId=${roomId}, player=${JSON.stringify(player)}`
@@ -61,19 +61,40 @@ io.on("connection", (socket) => {
     try {
       if (!player.name) throw new Error("Player name is required");
       if (!rooms[roomId]) throw new Error("Room does not exist");
-
-      const result = joinRoom(rooms, roomId, player);
-      if (result.error) throw new Error(result.error);
-
+      console.log(`Player is spectator: ${player.isSpectator}`);
+      if (player.isSpectator) {
+        if (!rooms[roomId].spectators) rooms[roomId].spectators = [];
+        rooms[roomId].spectators.push({
+          name: player.name,
+          socketId: socket.id,
+        });
+        console.log(`Spectator joined: ${player.name} in room: ${roomId}`);
+      } else {
+        const result = joinRoom(rooms, roomId, player);
+        if (result.error) throw new Error(result.error);
+        console.log(`Player joined: ${player.name} in room: ${roomId}`);
+      }
       socket.join(roomId);
       io.to(roomId).emit("room-update", rooms[roomId]);
-      console.log(`Player joined room: ${roomId}`, rooms[roomId]);
+      return;
     } catch (error) {
       console.error(`Failed to join room: ${error.message}`);
-      socket.to().emit("join-error", error.message);
+      socket.emit("join-error", error.message);
     }
   });
 
+  // Update room
+  socket.on("update-room", (roomId) => {
+    console.log(`Update room request: roomId=${roomId}`);
+    if (rooms[roomId]) {
+      io.to(roomId).emit("room-update", rooms[roomId]);
+      console.log(`Room updated: ${roomId}`, rooms[roomId]);
+    } else {
+      socket.emit("update-error", "Room does not exist");
+    }
+  });
+
+  // Remove player
   socket.on("remove-player", ({ roomId, name: playerName }, callback) => {
     console.log(
       `Remove player request: roomId=${roomId}, playerName=${playerName}`
@@ -81,13 +102,21 @@ io.on("connection", (socket) => {
     try {
       if (!rooms[roomId]) throw new Error("Room does not exist");
 
+      // Remove player or spectator
       rooms = removePlayerByName(rooms, roomId, playerName);
-      if (rooms[roomId] && rooms[roomId].players.length > 0) {
-        io.to(roomId).emit("room-update", rooms[roomId]);
-        console.log(`Player removed from room: ${roomId}`, rooms[roomId]);
-      } else {
+      rooms[roomId].spectators = rooms[roomId].spectators.filter(
+        (spectator) => spectator.name !== playerName
+      );
+
+      if (
+        rooms[roomId].players.length === 0 &&
+        rooms[roomId].spectators.length === 0
+      ) {
         delete rooms[roomId];
         console.log(`Room deleted: ${roomId}`);
+      } else {
+        io.to(roomId).emit("room-update", rooms[roomId]);
+        console.log(`Player removed from room: ${roomId}`, rooms[roomId]);
       }
       callback(true);
     } catch (error) {
@@ -108,26 +137,56 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Spectator joins room
+  socket.on("join-spectator-room", ({ roomId, player }) => {
+    console.log(
+      `Spectator joining room: roomId=${roomId}, player=${JSON.stringify(
+        player
+      )}`
+    );
+    if (!rooms[roomId]) {
+      socket.emit("join-error", "Room does not exist");
+      return;
+    }
+
+    // Add spectator to the room
+    if (!rooms[roomId].spectators) rooms[roomId].spectators = [];
+    rooms[roomId].spectators.push({ name: player.name, socketId: socket.id });
+
+    socket.join(roomId);
+    io.to(roomId).emit("spectator-joined", { roomId, player });
+    console.log(`Spectator joined room: ${roomId}`);
+  });
+
   // Handle disconnection
   socket.on("disconnect", () => {
     console.log(`User disconnected: ${socket.id}`);
     for (const roomId in rooms) {
-      const playerToRemove = Object.values(rooms[roomId].players).find(
+      const playerToRemove = rooms[roomId].players.find(
         (p) => p.socketId === socket.id
+      );
+      const spectatorToRemove = rooms[roomId].spectators.find(
+        (s) => s.socketId === socket.id
       );
 
       if (playerToRemove) {
         rooms = removePlayerByName(rooms, roomId, playerToRemove.name);
-        if (rooms[roomId].players.length === 0) {
-          delete rooms[roomId];
-          console.log(`Room deleted due to disconnect: ${roomId}`);
-        } else {
-          io.to(roomId).emit("room-update", rooms[roomId]);
-          console.log(
-            `Player removed from room due to disconnect: ${roomId}`,
-            rooms[roomId]
-          );
-        }
+      }
+      if (spectatorToRemove) {
+        rooms[roomId].spectators = rooms[roomId].spectators.filter(
+          (s) => s.socketId !== socket.id
+        );
+      }
+
+      if (
+        rooms[roomId].players.length === 0 &&
+        rooms[roomId].spectators.length === 0
+      ) {
+        delete rooms[roomId];
+        console.log(`Room deleted due to disconnect: ${roomId}`);
+      } else {
+        io.to(roomId).emit("room-update", rooms[roomId]);
+        console.log(`Room updated due to disconnect: ${roomId}`);
       }
     }
   });
